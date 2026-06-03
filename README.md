@@ -7,7 +7,6 @@ A smart medication storage prototype designed to support people with Multiple Sc
 ## Features
 
 * Temperature monitoring
-* Humidity monitoring
 * Medication reminders
 * OLED status display
 * RGB LED indicators
