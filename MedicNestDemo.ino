@@ -10,12 +10,10 @@
 #define SCREEN_HEIGHT 64
 #define OLED_RESET -1
 
-
-
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // =====================================================
-// BUTTON + OUTPUT
+// PINS
 // =====================================================
 
 #define BUTTON_PIN 3
@@ -24,8 +22,6 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define GREEN_PIN 6
 #define BLUE_PIN 7
 #define BUZZER_PIN 8
-
-void playSound(int frequency, int duration = 0);
 
 // =====================================================
 // STATES
@@ -39,17 +35,26 @@ enum State {
 };
 
 State currentState = SAFE;
-
-// button debounce
-bool lastButton = HIGH;
-unsigned long lastPress = 0;
-const unsigned long debounce = 300;
+State previousState = SAFE;
 
 // =====================================================
-// TIMERS (fake but realistic)
+// BUTTON DEBOUNCE
+// =====================================================
+
+bool lastButton = HIGH;
+unsigned long lastPress = 0;
+const unsigned long debounce = 250;
+
+// =====================================================
+// TIMERS
 // =====================================================
 
 unsigned long storageWarningStart = 0;
+
+unsigned long lastDisplayUpdate = 0;
+const unsigned long displayInterval = 1000; // update every second
+
+unsigned long lastBeep = 0;
 
 // =====================================================
 // SETUP
@@ -66,13 +71,18 @@ void setup() {
   pinMode(BLUE_PIN, OUTPUT);
   pinMode(BUZZER_PIN, OUTPUT);
 
-  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("SSD1306 failed");
+    while (1);
+  }
+
   display.clearDisplay();
   display.display();
 
   storageWarningStart = millis();
 
   setGreen();
+  render();
 }
 
 // =====================================================
@@ -82,45 +92,95 @@ void setup() {
 void loop() {
 
   handleButton();
-  render();
 
-  delay(3000);
+  // redraw immediately after state change
+  if (currentState != previousState) {
+    render();
+    previousState = currentState;
+  }
+
+  // periodic refresh
+  if (millis() - lastDisplayUpdate >= displayInterval) {
+    lastDisplayUpdate = millis();
+    render();
+  }
+
+  handleBuzzer();
 }
 
 // =====================================================
-// BUTTON (cycle states)
+// BUTTON
 // =====================================================
 
 void handleButton() {
 
   bool b = digitalRead(BUTTON_PIN);
 
-  if (b == LOW && lastButton == HIGH &&
+  if (b == LOW &&
+      lastButton == HIGH &&
       millis() - lastPress > debounce) {
 
     currentState = (State)((currentState + 1) % 4);
 
     lastPress = millis();
+
+    // optional feedback click
+    tone(BUZZER_PIN, 2000, 50);
   }
 
   lastButton = b;
 }
 
 // =====================================================
-// UI
+// BUZZER
+// =====================================================
+
+void handleBuzzer() {
+
+  unsigned long now = millis();
+
+  switch (currentState) {
+
+    case SAFE:
+      noTone(BUZZER_PIN);
+      break;
+
+    case WARNING_1:
+
+      // short beep every 5 seconds
+      if (now - lastBeep > 5000) {
+        tone(BUZZER_PIN, 1000, 200);
+        lastBeep = now;
+      }
+      break;
+
+    case WARNING_2:
+
+      // short beep every 2 seconds
+      if (now - lastBeep > 2000) {
+        tone(BUZZER_PIN, 1200, 250);
+        lastBeep = now;
+      }
+      break;
+
+    case EXPIRED:
+      noTone(BUZZER_PIN);
+      break;
+  }
+}
+
+// =====================================================
+// DISPLAY
 // =====================================================
 
 void render() {
 
   display.clearDisplay();
-  display.setTextSize(1);
+
   display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
 
-  float fakeTemp = 6.2; // stable “good fridge temp”
-
-  // =====================================================
-  // SAFE
-  // =====================================================
+  float fakeTemp = 6.2;
 
   if (currentState == SAFE) {
 
@@ -136,13 +196,7 @@ void render() {
 
     display.setCursor(0, 40);
     display.println("Dosis om 12d");
-
-    noTone(BUZZER_PIN);
   }
-
-  // =====================================================
-  // WARNING 1 (storage risk)
-  // =====================================================
 
   else if (currentState == WARNING_1) {
 
@@ -156,26 +210,27 @@ void render() {
     display.setCursor(0, 24);
     display.println("Opbevaring: ADVARSEL");
 
-    unsigned long elapsed = millis() - storageWarningStart;
-    unsigned long remaining = (24UL * 60UL * 60UL * 1000UL > elapsed)
-      ? (24UL * 60UL * 60UL * 1000UL - elapsed)
-      : 0;
+    unsigned long elapsed =
+      millis() - storageWarningStart;
 
-    unsigned long hours = remaining / 3600000UL;
-    unsigned long minutes = (remaining % 3600000UL) / 60000UL;
+    unsigned long limit =
+      24UL * 60UL * 60UL * 1000UL;
 
-    display.setCursor(0, 36);
+    unsigned long remaining =
+      (elapsed < limit) ? (limit - elapsed) : 0;
+
+    unsigned long hours =
+      remaining / 3600000UL;
+
+    unsigned long minutes =
+      (remaining % 3600000UL) / 60000UL;
+
+    display.setCursor(0, 38);
     display.print(hours);
     display.print("t ");
     display.print(minutes);
     display.println("m tilbage");
-
-    playSound(1000, 200);
   }
-
-  // =====================================================
-  // WARNING 2 (dose compliance risk)
-  // =====================================================
 
   else if (currentState == WARNING_2) {
 
@@ -185,15 +240,13 @@ void render() {
     display.print("Temp: ");
     display.print(fakeTemp);
     display.println(" C");
-    display.setCursor(0, 40);
-    display.println("Dosis 1 dag forsinket");
 
-    playSound(1200, 250);
+    display.setCursor(0, 30);
+    display.println("Dosis risiko");
+
+    display.setCursor(0, 42);
+    display.println("1 dag forsinket");
   }
-
-  // =====================================================
-  // EXPIRED
-  // =====================================================
 
   else if (currentState == EXPIRED) {
 
@@ -202,20 +255,9 @@ void render() {
     display.setTextSize(2);
     display.setCursor(0, 20);
     display.println("EXPIRED");
-
-    noTone(BUZZER_PIN);
   }
 
   display.display();
-}
-
-// =====================================================
-// SOUND
-// =====================================================
-
-void playSound(int frequency, int duration = 0) {
-  if (duration > 0) tone(BUZZER_PIN, frequency, duration);
-  else tone(BUZZER_PIN, frequency);
 }
 
 // =====================================================
